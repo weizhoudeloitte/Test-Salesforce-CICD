@@ -1,0 +1,46 @@
+name: SFDX Deploy To Common Dev Org
+on:
+  pull_request: 
+    types: [closed]
+    branches:
+      - develop
+  workflow_dispatch:
+jobs:
+  deploy_to_sandbox:
+    permissions:
+      contents: read
+    if:  github.event.pull_request.merged 
+    runs-on: ubuntu-latest
+    steps:
+      - name: Branch merged to ${{ github.event.pull_request.base.ref }}
+        run: echo "The branch has been merged to ${{ github.event.pull_request.base.ref }}"
+
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install SFDX CLI and Salesforce Git Delta (SFDX SGD)
+        run: |
+          npm install @salesforce/cli --global
+          sf version
+          mkdir -p ~/.config/sfdx && touch ~/.config/sfdx/unsignedPluginAllowList.json
+          echo "[\"sfdx-git-delta\"]" > ~/.config/sfdx/unsignedPluginAllowList.json 
+          echo 'y' | sf plugins install sfdx-git-delta@5.34.0
+
+      - name: Run SFDX SGD to diff the branch with previous tag 
+        run: | 
+          git fetch --all && git checkout ${{ github.event.pull_request.base.ref }} && git pull
+          latestReleaseTag=$(git describe --abbrev=0 --tags --match="${{ github.event.pull_request.base.ref }}/release-v[0-9]*" HEAD ) && echo "the last release tag on ${{ github.event.pull_request.base.ref }} branch is $latestReleaseTag"
+          previousCommitHash=$([ -z "$latestReleaseTag" ] && git rev-list --max-parents=0 HEAD || git rev-list -n 1 $latestReleaseTag) && currentCommitHash=$(git rev-parse HEAD) && echo "the target commit is $currentCommitHash AND the source commit is $previousCommitHash"
+          sf sgd source delta -t $currentCommitHash -f $previousCommitHash -r . --output . -D destructiveignore -i deltaignore
+
+      - name: Auth SF
+        run: | 
+           echo "loging in.... You may also check username on Salesforce"
+           echo "${{ secrets[format('{0}_SALESFORCE_JWT_SECRET_KEY', github.event.pull_request.base.ref)] }}" > ~/.config/sfdx/server.key
+           sf org login jwt --username ${{ secrets[format('{0}_SALESFORCE_USERNAME', github.event.pull_request.base.ref)] }} --jwt-key-file ~/.config/sfdx/server.key --client-id ${{ secrets[format('{0}_SALESFORCE_CONSUMER_KEY', github.event.pull_request.base.ref)] }} --alias common_dev --set-default
+      
+      - name: Deploy to Salesforce
+        run: |
+          sf project deploy start --manifest package/package.xml --post-destructive-changes destructiveChanges/destructiveChanges.xml --test-level RunLocalTests
+

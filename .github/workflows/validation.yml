@@ -1,0 +1,89 @@
+name: SFDX Deploy Validation
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+  workflow_dispatch:
+jobs:
+  validate_in_salesforce:
+    permissions:
+      contents: read
+      pull-requests: write
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Install SFDX CLI and Scanner and Saleforce Git Delta (SFDC SGD)
+        run: |
+          npm install @salesforce/cli --global
+          sf version
+          mkdir -p ~/.config/sfdx && touch ~/.config/sfdx/unsignedPluginAllowList.json
+          echo "[\"sfdx-git-delta\"]" > ~/.config/sfdx/unsignedPluginAllowList.json 
+          echo 'y' | sf plugins install sfdx-git-delta@5.34.0
+
+      - name: Run SFDX SGD to diff the branch with previous tag 
+        run: | 
+          git fetch --all
+          latestReleaseTag=$(git describe --abbrev=0 --tags --match="${{ github.event.pull_request.base.ref }}/release-v[0-9]*" HEAD ) && echo "the last release tag on ${{ github.event.pull_request.base.ref }} branch is $latestReleaseTag"
+          previousCommitHash=$([ -z "$latestReleaseTag" ] && git rev-list --max-parents=0 HEAD || git rev-list -n 1 $latestReleaseTag) && currentCommitHash=$(git rev-parse HEAD) && echo "the target commit is $currentCommitHash AND the source commit is $previousCommitHash"
+          sf sgd source delta -t $currentCommitHash -f $previousCommitHash -r . --output . -D destructiveignore -i deltaignore
+
+      - name: Auth SF
+        run: | 
+           echo "loging in.... You may also check username on Salesforce"
+           echo "${{ secrets[format('{0}_SALESFORCE_JWT_SECRET_KEY', github.event.pull_request.base.ref)] }}" > ~/.config/sfdx/server.key
+           sf org login jwt --username ${{ secrets[format('{0}_SALESFORCE_USERNAME', github.event.pull_request.base.ref)] }} --jwt-key-file ~/.config/sfdx/server.key --client-id ${{ secrets[format('{0}_SALESFORCE_CONSUMER_KEY', github.event.pull_request.base.ref)] }} --alias common_dev --set-default
+           
+      - name: Validate in Salesforce
+        run: |
+          asyncValidateMessage=$(sf project deploy validate --concise --manifest package/package.xml --test-level RunLocalTests --async --json)
+          echo $asyncValidateMessage
+          jobId=$(echo $asyncValidateMessage | jq -r ".result.id")
+          touch  ~/.config/sfdx/job_id.txt
+          echo $jobId > ~/.config/sfdx/job_id.txt
+
+      - name: Log Validation Message
+        shell: bash {0}
+        id: validate_salesforce
+        run: |
+          jobId=$(cat ~/.config/sfdx/job_id.txt)
+          echo "Continue to Monitor Validation Job $jobId"
+          EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
+          echo "SALESFORCE_VALIDATION_MESSAGE<<$EOF" >> "$GITHUB_OUTPUT"
+          sf project deploy resume --concise --job-id $jobId --coverage-formatters text-summary>> "$GITHUB_OUTPUT"
+          cat coverage/coverage/text-summary.txt >> "$GITHUB_OUTPUT"
+          echo "$EOF" >> "$GITHUB_OUTPUT"
+          echo "Validation Complete"  
+
+      - name: Write Validation Message to PR Comment
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `Validation Message:\n\`\`\`text\n${{ steps.validate_salesforce.outputs.SALESFORCE_VALIDATION_MESSAGE }}\n\`\`\``
+            })
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reflect Status to PR
+        run: |
+          jobId=$(cat ~/.config/sfdx/job_id.txt)
+          validationReport=$(sf project deploy report --job-id $jobId)
+          validationStatus=$(grep -m 1 -o "status\s.*" <<< "$validationReport")
+          validationStatus="${validationStatus// /}"
+          validationStatus="${validationStatus/status/}"
+          if [[ $validationStatus == 'Failed' ]]; then
+            exit 1
+          fi 
+
+          
+    
+            
+
+
