@@ -8,5 +8,5 @@
   "name": "TEST-SALESFORCE-CICD",
   "namespace": "",
   "sfdcLoginUrl": "https://login.salesforce.com",
-  "orgApiVersion": "64.0"
+  "sourceApiVersion": "64.0"
 }
